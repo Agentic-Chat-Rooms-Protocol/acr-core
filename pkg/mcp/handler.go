@@ -784,6 +784,12 @@ func (s *Server) CastVote(proposalID, voterDID, choice, rationale string) (*mode
 		agentName = agent.Name
 	}
 
+	if strings.ToUpper(choice) == "DISSENT" {
+		if strings.TrimSpace(rationale) == "" {
+			return nil, fmt.Errorf("dissent votes strictly require a non-empty rationale (GAP-08)")
+		}
+	}
+
 	prop.Votes[voterDID] = choice
 
 	if strings.ToUpper(choice) == "DISSENT" || rationale != "" {
@@ -925,4 +931,9 @@ func generateRandomHex(n int) string {
 	bytes := make([]byte, n)
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
+}
+
+// GetAuditTrail returns the full immutable state hash audit trail (GAP-06).
+func (s *Server) GetAuditTrail() []*models.AuditEntry {
+	return s.gov.GetAuditTrail()
 }

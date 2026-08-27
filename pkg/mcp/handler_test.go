@@ -470,7 +470,13 @@ func TestVotingAndDissent(t *testing.T) {
 		t.Fatalf("CastVote approve failed: %v", err)
 	}
 
-	// 3. Cast Dissent Vote with Rationale (GAP-08)
+	// 3. Reject Dissent Vote without Rationale (GAP-08)
+	_, err = s.CastVote(prop.ID, "did:key:z6Mkdissent_invalid", "DISSENT", "")
+	if err == nil {
+		t.Fatalf("expected CastVote to fail when DISSENT lacks rationale, got nil")
+	}
+
+	// 4. Cast Dissent Vote with Rationale (GAP-08)
 	updated, err := s.CastVote(prop.ID, "did:key:z6Mkdissent", "DISSENT", "Concern regarding cross-room memory boundary leak in PR #104")
 	if err != nil {
 		t.Fatalf("CastVote dissent failed: %v", err)

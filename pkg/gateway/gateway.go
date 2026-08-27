@@ -82,6 +82,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 
 	// Health (GAP-16)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/healthz", s.handleHealth)
 
 	// Auth (GAP-04)
 	mux.HandleFunc("/api/v1/auth/challenge", s.handleAuthChallenge)
@@ -102,8 +104,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/escalations", s.handleEscalations)
 	mux.HandleFunc("/api/v1/escalations/", s.handleEscalationResolve)
 
-	// Audit
+	// Audit (GAP-06)
 	mux.HandleFunc("/api/v1/audit", s.handleAudit)
+	mux.HandleFunc("/api/v1/audit/chain", s.handleAudit)
 
 	// Proposals / Voting & Dissent (GAP-08)
 	mux.HandleFunc("/api/v1/proposals", s.handleProposals)
@@ -308,6 +311,55 @@ func (s *Server) handleRoomSubroutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /api/v1/rooms/:id/proposals
+	if len(parts) >= 5 && parts[4] == "proposals" {
+		if len(parts) == 5 {
+			if r.Method == http.MethodGet {
+				jsonResponse(w, s.mcpServer.GetProposals(roomID))
+				return
+			}
+			if r.Method == http.MethodPost {
+				var req struct {
+					Title       string   `json:"title"`
+					Description string   `json:"description"`
+					ProposerDID string   `json:"proposer_did"`
+					Options     []string `json:"options"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				prop, err := s.mcpServer.CreateProposal(roomID, req.Title, req.Description, req.ProposerDID, req.Options)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				jsonResponse(w, prop)
+				return
+			}
+		}
+		if len(parts) >= 7 && parts[6] == "vote" && r.Method == http.MethodPost {
+			propID := parts[5]
+			var req struct {
+				VoterDID  string `json:"voter_did"`
+				Choice    string `json:"choice"`
+				Rationale string `json:"rationale"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			prop, err := s.mcpServer.CastVote(propID, req.VoterDID, req.Choice, req.Rationale)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			jsonResponse(w, prop)
+			return
+		}
+	}
+
 	http.NotFound(w, r)
 }
 
@@ -481,11 +533,15 @@ func (s *Server) handleEscalationResolve(w http.ResponseWriter, r *http.Request)
 // ===== AUDIT =====
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	corsHeaders(w)
 	if r.Method == http.MethodOptions {
-		corsHeaders(w)
 		return
 	}
-	jsonResponse(w, s.govEngine.GetAuditTrail())
+	trail := s.govEngine.GetAuditTrail()
+	jsonResponse(w, map[string]interface{}{
+		"depth": len(trail),
+		"trail": trail,
+	})
 }
 
 // ===== PROPOSALS / VOTING & DISSENT (GAP-08) =====
