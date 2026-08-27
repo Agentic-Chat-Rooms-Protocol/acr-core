@@ -19,13 +19,18 @@ type BuddyRelation struct {
 
 // HealthStatus represents the daemon's health check response.
 type HealthStatus struct {
-	Version         string `json:"version"`
-	Status          string `json:"status"`
-	Uptime          string `json:"uptime"`
-	AgentCount      int    `json:"agent_count"`
-	RoomCount       int    `json:"room_count"`
-	AuditChainDepth int    `json:"audit_chain_depth"`
-	MeshLatencyMs   float64 `json:"mesh_latency_ms"`
+	Version                string  `json:"version"`
+	Status                 string  `json:"status"`
+	Uptime                 string  `json:"uptime"`
+	AgentCount             int     `json:"agent_count"`
+	RoomCount              int     `json:"room_count"`
+	AuditChainDepth        int     `json:"audit_chain_depth"`
+	MeshLatencyMs          float64 `json:"mesh_latency_ms"`
+	DissentTotalVotes      int     `json:"dissent_total_votes"`
+	DissentAccepted        int     `json:"dissent_accepted"`
+	DissentRejected        int     `json:"dissent_rejected"`
+	DissentRejectionRate   float64 `json:"dissent_rejection_rate"`
+	DissentAnomalyDetected bool    `json:"dissent_anomaly_detected"`
 }
 
 // AuthChallenge is the nonce sent to an agent for DID challenge-response auth.

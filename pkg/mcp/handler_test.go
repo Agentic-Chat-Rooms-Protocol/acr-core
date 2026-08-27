@@ -325,6 +325,33 @@ func TestHealth(t *testing.T) {
 	if health.RoomCount != 2 {
 		t.Errorf("expected 2 rooms (default), got %d", health.RoomCount)
 	}
+
+	// Verify initial dissent metrics
+	if health.DissentTotalVotes != 0 || health.DissentRejected != 0 {
+		t.Errorf("expected initial 0 dissent votes, got total=%d, rejected=%d", health.DissentTotalVotes, health.DissentRejected)
+	}
+
+	// Create proposal and test dissent telemetry calculation
+	prop, err := s.CreateProposal("consensus-main", "CIP Telemetry", "Test metrics", "did:key:z6Mkh1", nil)
+	if err != nil {
+		t.Fatalf("CreateProposal failed: %v", err)
+	}
+
+	// 1. Rejected dissent (no rationale)
+	_, _ = s.CastVote(prop.ID, "did:key:bad", "DISSENT", "")
+	// 2. Accepted dissent (with rationale)
+	_, _ = s.CastVote(prop.ID, "did:key:good", "DISSENT", "Valid rationale provided")
+
+	updatedHealth := s.GetHealth()
+	if updatedHealth.DissentRejected != 1 {
+		t.Errorf("expected 1 rejected dissent, got %d", updatedHealth.DissentRejected)
+	}
+	if updatedHealth.DissentAccepted != 1 {
+		t.Errorf("expected 1 accepted dissent, got %d", updatedHealth.DissentAccepted)
+	}
+	if updatedHealth.DissentRejectionRate != 0.5 {
+		t.Errorf("expected 0.5 rejection rate, got %f", updatedHealth.DissentRejectionRate)
+	}
 }
 
 func TestSendMessageWithToolCall(t *testing.T) {

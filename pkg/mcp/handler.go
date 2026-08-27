@@ -39,10 +39,13 @@ type Server struct {
 	rateLimiter   map[string]*rateLimitBucket       // key: DID (GAP-06)
 	proposals     map[string]*models.Proposal       // key: ProposalID (GAP-08)
 	files         map[string]*models.FileAttachment // key: FileID (GAP-17)
-	stateFilePath string                            // GAP-13
-	gov           *governance.Engine
-	broadcaster   HubBroadcaster
-	startTime     time.Time
+	stateFilePath     string                            // GAP-13
+	gov               *governance.Engine
+	broadcaster       HubBroadcaster
+	startTime         time.Time
+	dissentTotalVotes int // GAP-08 Telemetry
+	dissentAccepted   int // GAP-08 Telemetry
+	dissentRejected   int // GAP-08 Telemetry
 }
 
 type authPendingChallenge struct {
@@ -679,14 +682,27 @@ func (s *Server) GetHealth() *models.HealthStatus {
 
 	uptime := time.Since(s.startTime)
 
+	var rate float64
+	dissentAttempts := s.dissentAccepted + s.dissentRejected
+	if dissentAttempts > 0 {
+		rate = float64(s.dissentRejected) / float64(dissentAttempts)
+	}
+
+	anomaly := s.dissentRejected > 3 && rate > 0.25
+
 	return &models.HealthStatus{
-		Version:         "v0.8.2-draft",
-		Status:          "healthy",
-		Uptime:          uptime.Round(time.Second).String(),
-		AgentCount:      len(s.agents),
-		RoomCount:       len(s.rooms),
-		AuditChainDepth: len(s.gov.GetAuditTrail()),
-		MeshLatencyMs:   0.38,
+		Version:                "v0.8.2-draft",
+		Status:                 "healthy",
+		Uptime:                 uptime.Round(time.Second).String(),
+		AgentCount:             len(s.agents),
+		RoomCount:              len(s.rooms),
+		AuditChainDepth:        len(s.gov.GetAuditTrail()),
+		MeshLatencyMs:          0.38,
+		DissentTotalVotes:      s.dissentTotalVotes,
+		DissentAccepted:        s.dissentAccepted,
+		DissentRejected:        s.dissentRejected,
+		DissentRejectionRate:   rate,
+		DissentAnomalyDetected: anomaly,
 	}
 }
 
@@ -784,10 +800,14 @@ func (s *Server) CastVote(proposalID, voterDID, choice, rationale string) (*mode
 		agentName = agent.Name
 	}
 
+	s.dissentTotalVotes++
+
 	if strings.ToUpper(choice) == "DISSENT" {
 		if strings.TrimSpace(rationale) == "" {
+			s.dissentRejected++
 			return nil, fmt.Errorf("dissent votes strictly require a non-empty rationale (GAP-08)")
 		}
+		s.dissentAccepted++
 	}
 
 	prop.Votes[voterDID] = choice
