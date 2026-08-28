@@ -21,6 +21,9 @@ type Agent struct {
 	Role         string      `json:"role"` // "agent" | "human" | "sentinel"
 	Status       AgentStatus `json:"status"`
 	Org          string      `json:"org"`
+	ProcessPath  string      `json:"process_path,omitempty"`
+	Tags         []string    `json:"tags,omitempty"`
+	Description  string      `json:"description,omitempty"`
 	Capabilities []string    `json:"capabilities"`
 	Verified     bool        `json:"verified"`
 	LastSeen     time.Time   `json:"last_seen"`
