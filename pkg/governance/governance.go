@@ -109,8 +109,11 @@ func (e *Engine) RecordAudit(eventType, actorDID, roomID string, payload interfa
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	payloadBytes, _ := json.Marshal(payload)
-	entry := e.appendAuditLocked(eventType, actorDID, roomID, string(payloadBytes))
+	canonBytes, err := identity.CanonicalizeJSON(payload)
+	if err != nil {
+		canonBytes = []byte("{}")
+	}
+	entry := e.appendAuditLocked(eventType, actorDID, roomID, string(canonBytes))
 	if e.onAuditEntry != nil {
 		go e.onAuditEntry(entry)
 	}
@@ -120,7 +123,7 @@ func (e *Engine) RecordAudit(eventType, actorDID, roomID string, payload interfa
 func (e *Engine) appendAuditLocked(eventType, actorDID, roomID, payloadStr string) *models.AuditEntry {
 	idx := uint64(len(e.auditTrail))
 	ts := time.Now().UTC()
-	newHash := identity.ComputeEventHash(e.latestHash, idx, eventType, actorDID, payloadStr, ts)
+	newHash := identity.ComputeCanonicalEventHash(e.latestHash, idx, eventType, actorDID, payloadStr, ts)
 
 	entry := &models.AuditEntry{
 		Index:     idx,

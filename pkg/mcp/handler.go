@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"acr-core/pkg/governance"
 	"acr-core/pkg/identity"
@@ -39,13 +40,10 @@ type Server struct {
 	rateLimiter   map[string]*rateLimitBucket       // key: DID (GAP-06)
 	proposals     map[string]*models.Proposal       // key: ProposalID (GAP-08)
 	files         map[string]*models.FileAttachment // key: FileID (GAP-17)
-	stateFilePath     string                            // GAP-13
-	gov               *governance.Engine
-	broadcaster       HubBroadcaster
-	startTime         time.Time
-	dissentTotalVotes int // GAP-08 Telemetry
-	dissentAccepted   int // GAP-08 Telemetry
-	dissentRejected   int // GAP-08 Telemetry
+	stateFilePath string                            // GAP-13
+	gov           *governance.Engine
+	broadcaster   HubBroadcaster
+	startTime     time.Time
 }
 
 type authPendingChallenge struct {
@@ -682,27 +680,14 @@ func (s *Server) GetHealth() *models.HealthStatus {
 
 	uptime := time.Since(s.startTime)
 
-	var rate float64
-	dissentAttempts := s.dissentAccepted + s.dissentRejected
-	if dissentAttempts > 0 {
-		rate = float64(s.dissentRejected) / float64(dissentAttempts)
-	}
-
-	anomaly := s.dissentRejected > 3 && rate > 0.25
-
 	return &models.HealthStatus{
-		Version:                "v0.8.2-draft",
-		Status:                 "healthy",
-		Uptime:                 uptime.Round(time.Second).String(),
-		AgentCount:             len(s.agents),
-		RoomCount:              len(s.rooms),
-		AuditChainDepth:        len(s.gov.GetAuditTrail()),
-		MeshLatencyMs:          0.38,
-		DissentTotalVotes:      s.dissentTotalVotes,
-		DissentAccepted:        s.dissentAccepted,
-		DissentRejected:        s.dissentRejected,
-		DissentRejectionRate:   rate,
-		DissentAnomalyDetected: anomaly,
+		Version:         "v0.8.2-draft",
+		Status:          "healthy",
+		Uptime:          uptime.Round(time.Second).String(),
+		AgentCount:      len(s.agents),
+		RoomCount:       len(s.rooms),
+		AuditChainDepth: len(s.gov.GetAuditTrail()),
+		MeshLatencyMs:   0.38,
 	}
 }
 
@@ -751,6 +736,9 @@ func (s *Server) CreateProposal(roomID, title, description, proposerDID string, 
 	if !s.checkRoomAccessLocked(room, proposerDID) {
 		return nil, fmt.Errorf("agent %s not authorized in room %s", proposerDID, roomID)
 	}
+	if s.isBlockedInRoom(proposerDID, room) {
+		return nil, fmt.Errorf("GAP-02 Invariant: agent %s is blocked in room %s", proposerDID, roomID)
+	}
 
 	if len(options) == 0 {
 		options = []string{"APPROVE", "REJECT", "DISSENT"}
@@ -781,6 +769,52 @@ func (s *Server) CreateProposal(roomID, title, description, proposerDID string, 
 	return prop, nil
 }
 
+// sanitizeAndValidateRationale validates and cleans dissent rationale according to GAP-08.
+// Strips zero-width runes, enforces minimum length (10 runes) and maximum length (4096 bytes),
+// rejects ASCII control characters, and verifies substantive entropy.
+func sanitizeAndValidateRationale(raw string) (string, error) {
+	var b strings.Builder
+	for _, r := range raw {
+		switch r {
+		case '\u200B', '\u200C', '\u200D', '\uFEFF', '\u2060', '\u200E', '\u200F', '\u00A0':
+			continue
+		default:
+			if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+				return "", fmt.Errorf("GAP-08 Invariant: dissent rationale contains illegal control character (0x%02X)", r)
+			}
+			b.WriteRune(r)
+		}
+	}
+
+	cleaned := strings.TrimSpace(b.String())
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("GAP-08 Invariant: a DISSENT vote must include a non-empty rationale statement")
+	}
+
+	if len([]rune(cleaned)) < 10 {
+		return "", fmt.Errorf("GAP-08 Invariant: DISSENT rationale must be substantive (minimum 10 characters required, got %d)", len([]rune(cleaned)))
+	}
+
+	if len(cleaned) > 4096 {
+		return "", fmt.Errorf("GAP-08 Invariant: DISSENT rationale exceeds maximum length of 4096 bytes")
+	}
+
+	distinctRunes := make(map[rune]struct{})
+	alphanumericCount := 0
+	for _, r := range cleaned {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			distinctRunes[r] = struct{}{}
+			alphanumericCount++
+		}
+	}
+
+	if alphanumericCount < 6 || len(distinctRunes) < 4 {
+		return "", fmt.Errorf("GAP-08 Invariant: DISSENT rationale lacks substantive content (insufficient entropy)")
+	}
+
+	return cleaned, nil
+}
+
 // CastVote records an agent's vote with optional dissent rationale (GAP-08).
 func (s *Server) CastVote(proposalID, voterDID, choice, rationale string) (*models.Proposal, error) {
 	s.mu.Lock()
@@ -794,37 +828,62 @@ func (s *Server) CastVote(proposalID, voterDID, choice, rationale string) (*mode
 		return nil, fmt.Errorf("proposal %s is already closed", proposalID)
 	}
 
+	choiceUpper := strings.ToUpper(strings.TrimSpace(choice))
+	if choiceUpper == "DISSENT" {
+		cleanedRationale, err := sanitizeAndValidateRationale(rationale)
+		if err != nil {
+			return nil, err
+		}
+		rationale = cleanedRationale
+	}
+
+	// GAP-02: Check if voter is blocked by proposal creator
+	for _, rel := range s.buddies[prop.ProposerDID] {
+		if rel.ToDID == voterDID && rel.Status == models.BuddyBlocked {
+			return nil, fmt.Errorf("GAP-02 Invariant: voter %s is blocked by proposer %s", voterDID, prop.ProposerDID)
+		}
+	}
+
 	agent, agentExists := s.agents[voterDID]
 	agentName := voterDID
 	if agentExists {
 		agentName = agent.Name
 	}
 
-	s.dissentTotalVotes++
+	prop.Votes[voterDID] = choiceUpper
 
-	if strings.ToUpper(choice) == "DISSENT" {
-		if strings.TrimSpace(rationale) == "" {
-			s.dissentRejected++
-			return nil, fmt.Errorf("dissent votes strictly require a non-empty rationale (GAP-08)")
-		}
-		s.dissentAccepted++
-	}
-
-	prop.Votes[voterDID] = choice
-
-	if strings.ToUpper(choice) == "DISSENT" || rationale != "" {
+	if choiceUpper == "DISSENT" || rationale != "" {
 		dissent := models.DissentRecord{
 			VoterDID:  voterDID,
 			AgentName: agentName,
 			Rationale: rationale,
 			Timestamp: time.Now().UTC(),
 		}
-		prop.DissentLogs = append(prop.DissentLogs, dissent)
+		// Update existing dissent record if voter previously dissented
+		found := false
+		for i, log := range prop.DissentLogs {
+			if log.VoterDID == voterDID {
+				prop.DissentLogs[i] = dissent
+				found = true
+				break
+			}
+		}
+		if !found {
+			prop.DissentLogs = append(prop.DissentLogs, dissent)
+		}
 		s.gov.RecordAudit("VOTE_DISSENT_RECORDED", voterDID, prop.RoomID, dissent)
 	} else {
+		// Filter out previous dissent if voter switched choice
+		filtered := make([]models.DissentRecord, 0, len(prop.DissentLogs))
+		for _, log := range prop.DissentLogs {
+			if log.VoterDID != voterDID {
+				filtered = append(filtered, log)
+			}
+		}
+		prop.DissentLogs = filtered
 		s.gov.RecordAudit("VOTE_CAST", voterDID, prop.RoomID, map[string]interface{}{
 			"proposal_id": proposalID,
-			"choice":      choice,
+			"choice":      choiceUpper,
 		})
 	}
 
@@ -951,9 +1010,4 @@ func generateRandomHex(n int) string {
 	bytes := make([]byte, n)
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
-}
-
-// GetAuditTrail returns the full immutable state hash audit trail (GAP-06).
-func (s *Server) GetAuditTrail() []*models.AuditEntry {
-	return s.gov.GetAuditTrail()
 }

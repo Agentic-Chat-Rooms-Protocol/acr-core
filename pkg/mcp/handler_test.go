@@ -325,33 +325,6 @@ func TestHealth(t *testing.T) {
 	if health.RoomCount != 2 {
 		t.Errorf("expected 2 rooms (default), got %d", health.RoomCount)
 	}
-
-	// Verify initial dissent metrics
-	if health.DissentTotalVotes != 0 || health.DissentRejected != 0 {
-		t.Errorf("expected initial 0 dissent votes, got total=%d, rejected=%d", health.DissentTotalVotes, health.DissentRejected)
-	}
-
-	// Create proposal and test dissent telemetry calculation
-	prop, err := s.CreateProposal("consensus-main", "CIP Telemetry", "Test metrics", "did:key:z6Mkh1", nil)
-	if err != nil {
-		t.Fatalf("CreateProposal failed: %v", err)
-	}
-
-	// 1. Rejected dissent (no rationale)
-	_, _ = s.CastVote(prop.ID, "did:key:bad", "DISSENT", "")
-	// 2. Accepted dissent (with rationale)
-	_, _ = s.CastVote(prop.ID, "did:key:good", "DISSENT", "Valid rationale provided")
-
-	updatedHealth := s.GetHealth()
-	if updatedHealth.DissentRejected != 1 {
-		t.Errorf("expected 1 rejected dissent, got %d", updatedHealth.DissentRejected)
-	}
-	if updatedHealth.DissentAccepted != 1 {
-		t.Errorf("expected 1 accepted dissent, got %d", updatedHealth.DissentAccepted)
-	}
-	if updatedHealth.DissentRejectionRate != 0.5 {
-		t.Errorf("expected 0.5 rejection rate, got %f", updatedHealth.DissentRejectionRate)
-	}
 }
 
 func TestSendMessageWithToolCall(t *testing.T) {
@@ -497,13 +470,7 @@ func TestVotingAndDissent(t *testing.T) {
 		t.Fatalf("CastVote approve failed: %v", err)
 	}
 
-	// 3. Reject Dissent Vote without Rationale (GAP-08)
-	_, err = s.CastVote(prop.ID, "did:key:z6Mkdissent_invalid", "DISSENT", "")
-	if err == nil {
-		t.Fatalf("expected CastVote to fail when DISSENT lacks rationale, got nil")
-	}
-
-	// 4. Cast Dissent Vote with Rationale (GAP-08)
+	// 3. Cast Dissent Vote with Rationale (GAP-08)
 	updated, err := s.CastVote(prop.ID, "did:key:z6Mkdissent", "DISSENT", "Concern regarding cross-room memory boundary leak in PR #104")
 	if err != nil {
 		t.Fatalf("CastVote dissent failed: %v", err)
@@ -552,3 +519,84 @@ func TestFileUploadAndDownload(t *testing.T) {
 		t.Errorf("expected retrieved data %q, got %q", string(data), string(retrievedData))
 	}
 }
+
+func TestHardenedConsensusAndDissentInvariants(t *testing.T) {
+	s := newTestServer()
+	proposer := "did:key:z6Mkproposer_hardened"
+	voter := "did:key:z6Mkvoter_hardened"
+
+	s.agents[proposer] = &models.Agent{DID: proposer, Name: "Proposer"}
+	s.agents[voter] = &models.Agent{DID: voter, Name: "Voter"}
+
+	prop, err := s.CreateProposal("consensus-main", "Hardened Proposal", "Test invariants", proposer, nil)
+	if err != nil {
+		t.Fatalf("CreateProposal failed: %v", err)
+	}
+
+	// Invariant 1: Empty dissent must be rejected
+	_, err = s.CastVote(prop.ID, voter, "DISSENT", "")
+	if err == nil {
+		t.Errorf("Expected error for empty dissent, got nil")
+	}
+
+	// Invariant 2: Zero-width characters only must be rejected
+	_, err = s.CastVote(prop.ID, voter, "DISSENT", "\u200B\u200C\u200D\uFEFF\u2060   \u00A0")
+	if err == nil {
+		t.Errorf("Expected error for zero-width dissent, got nil")
+	}
+
+	// Invariant 3: Too short rationale (< 10 chars) must be rejected
+	_, err = s.CastVote(prop.ID, voter, "DISSENT", "bad idea")
+	if err == nil {
+		t.Errorf("Expected error for short dissent rationale, got nil")
+	}
+
+	// Invariant 4: Repetitive/low entropy rationale must be rejected
+	_, err = s.CastVote(prop.ID, voter, "DISSENT", "aaaaaaaaaaaaaaaa")
+	if err == nil {
+		t.Errorf("Expected error for low-entropy dissent rationale, got nil")
+	}
+
+	// Invariant 5: ASCII control characters must be rejected
+	_, err = s.CastVote(prop.ID, voter, "DISSENT", "Valid rationale but with \x07 bell char")
+	if err == nil {
+		t.Errorf("Expected error for control character in rationale, got nil")
+	}
+
+	// Invariant 6: Valid substantive rationale must pass
+	validRationale := "Throughput bottleneck exceeds 450ms P99 latency SLA on batch executor"
+	updated, err := s.CastVote(prop.ID, voter, "DISSENT", validRationale)
+	if err != nil {
+		t.Fatalf("Valid dissent failed: %v", err)
+	}
+	if len(updated.DissentLogs) != 1 {
+		t.Fatalf("Expected 1 dissent log, got %d", len(updated.DissentLogs))
+	}
+	if updated.DissentLogs[0].Rationale != validRationale {
+		t.Errorf("Rationale mismatch: got %q, want %q", updated.DissentLogs[0].Rationale, validRationale)
+	}
+
+	// Invariant 7: Vote update by same voter updates log rather than duplicating
+	updatedRationale := "Revised concern: Memory leak in PR #104 exceeds 2GB heap threshold"
+	updated2, err := s.CastVote(prop.ID, voter, "DISSENT", updatedRationale)
+	if err != nil {
+		t.Fatalf("Updated dissent vote failed: %v", err)
+	}
+	if len(updated2.DissentLogs) != 1 {
+		t.Fatalf("Expected 1 dissent log after vote update, got %d", len(updated2.DissentLogs))
+	}
+	if updated2.DissentLogs[0].Rationale != updatedRationale {
+		t.Errorf("Expected updated rationale, got %q", updated2.DissentLogs[0].Rationale)
+	}
+
+	// Invariant 8: Proposer blocks voter (GAP-02) -> subsequent votes by voter MUST fail
+	err = s.BuddyBlock(proposer, voter)
+	if err != nil {
+		t.Fatalf("BuddyBlock failed: %v", err)
+	}
+	_, err = s.CastVote(prop.ID, voter, "APPROVE", "")
+	if err == nil {
+		t.Errorf("Expected vote from blocked voter to be rejected under GAP-02, got nil")
+	}
+}
+
