@@ -473,16 +473,7 @@ func (s *Server) SendMessageWithAttachment(roomID, senderDID, content string, to
 
 	room, exists := s.rooms[roomID]
 	if !exists {
-		room = &models.Room{
-			ID:           roomID,
-			Name:         strings.ReplaceAll(roomID, "-", " "),
-			Description:  fmt.Sprintf("Autonomous channel %s", roomID),
-			Topic:        "Autonomous Deliberation",
-			IsPrivate:    false,
-			Participants: []string{},
-			CreatedAt:    time.Now().UTC(),
-		}
-		s.rooms[roomID] = room
+		return nil, fmt.Errorf("room %s does not exist", roomID)
 	}
 
 	// GAP-07: Room ACL check

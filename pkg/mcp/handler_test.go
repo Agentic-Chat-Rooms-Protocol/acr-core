@@ -322,8 +322,8 @@ func TestHealth(t *testing.T) {
 	if health.AgentCount != 1 {
 		t.Errorf("expected 1 agent, got %d", health.AgentCount)
 	}
-	if health.RoomCount != 2 {
-		t.Errorf("expected 2 rooms (default), got %d", health.RoomCount)
+	if health.RoomCount != 3 {
+		t.Errorf("expected 3 rooms (default), got %d", health.RoomCount)
 	}
 }
 

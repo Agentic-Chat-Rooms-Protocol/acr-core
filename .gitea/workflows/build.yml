@@ -1,0 +1,43 @@
+name: Gitea Core Daemon Build & Snapshot Matrix
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!main'
+  pull_request:
+
+jobs:
+  test-and-snapshot:
+    name: Native Test & Cross-Platform Snapshot Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Run Native Unit & Integration Tests
+        run: |
+          echo "=== Running Go Test Suite in CGO_ENABLED=0 pure Go mode ==="
+          CGO_ENABLED=0 go test -v ./...
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          install-only: true
+
+      - name: Run GoReleaser Snapshot Build Matrix
+        run: |
+          echo "=== Validating 6-Target Cross-Compilation Matrix (Snapshot Mode) ==="
+          goreleaser build --snapshot --clean
+          echo "=== Snapshot Artifacts Generated ==="
+          ls -lh dist/
