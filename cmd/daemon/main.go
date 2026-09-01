@@ -56,7 +56,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      mux,
+		Handler:      gateway.CorsMiddleware(mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // Keep connection open for SSE
 	}

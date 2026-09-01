@@ -121,7 +121,20 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 func corsHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-ACR-Session, X-ACR-Client")
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+}
+
+// CorsMiddleware wraps an http.Handler with Private Network Access (PNA) and CORS support.
+func CorsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		corsHeaders(w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
