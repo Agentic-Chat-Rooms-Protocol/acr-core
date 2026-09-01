@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
-project_name: acr-daemon
+project_name: acr-core
 
 builds:
   - id: acr-daemon
@@ -24,11 +24,32 @@ builds:
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
 
+  - id: acr-mcp-server
+    main: ./cmd/mcp-server
+    binary: acr-mcp-server-{{ .Os }}-{{ .Arch }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
 archives:
   - id: default
     builds:
       - acr-daemon
-    name_template: "acr-daemon-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+      - acr-mcp-server
+    name_template: "acr-core-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     format: tar.gz
     format_overrides:
       - goos: windows
