@@ -13,6 +13,7 @@ import (
 	"acr-core/pkg/governance"
 	"acr-core/pkg/mcp"
 	"acr-core/pkg/models"
+	"acr-core/pkg/review"
 )
 
 func main() {
@@ -79,12 +80,29 @@ func main() {
 	mux := http.NewServeMux()
 	gwServer.RegisterRoutes(mux)
 
-	port := 20443
-	fmt.Printf("[ACR Core] SSE Stream ready on: http://localhost:%d/api/v1/stream\n", port)
-	fmt.Printf("[ACR Core] REST API ready on:   http://localhost:%d/api/v1/rooms\n", port)
+	// --- Protocol Review Subsystem ---
+	giteaURL := os.Getenv("ACR_GITEA_URL")
+	if giteaURL == "" {
+		giteaURL = "http://localhost:3300"
+	}
+	giteaToken := os.Getenv("ACR_GITEA_TOKEN")
+	giteaClient, giteaErr := review.NewGiteaClient(giteaURL, giteaToken)
+	if giteaErr != nil {
+		log.Printf("[ACR Review] Gitea client init failed (offline mode): %v", giteaErr)
+		giteaClient = nil
+	}
+	consensusEngine, _ := review.NewEphemeralConsensusEngine("did:key:acr-daemon")
+	stackController := review.NewStackController(giteaClient, consensusEngine, nil)
+	reviewHandler := review.NewReviewHandler(stackController, review.NewAstDiffer())
+	reviewHandler.RegisterRoutes(mux)
+
+	fmt.Printf("[ACR Core] SSE Stream ready on: http://localhost:%d/api/v1/stream\n", *portFlag)
+	fmt.Printf("[ACR Core] REST API ready on:   http://localhost:%d/api/v1/rooms\n", *portFlag)
+	fmt.Printf("[ACR Core] Review API ready on: http://localhost:%d/api/v1/stacks\n", *portFlag)
+	fmt.Printf("[ACR Core] Gitea Webhook at:    http://localhost:%d/webhooks/gitea\n", *portFlag)
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
+		Addr:         fmt.Sprintf(":%d", *portFlag),
 		Handler:      gateway.CorsMiddleware(mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // Keep connection open for SSE
