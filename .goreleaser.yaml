@@ -1,0 +1,54 @@
+# .goreleaser.yaml for acr-core (ACR Protocol Reference Daemon)
+version: 2
+
+project_name: acr-core
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: acr-daemon
+    main: ./cmd/daemon/main.go
+    binary: acr-daemon
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - SECURITY.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: Agentic-Chat-Rooms-Protocol
+    name: acr-core
+  draft: false
+  prerelease: auto

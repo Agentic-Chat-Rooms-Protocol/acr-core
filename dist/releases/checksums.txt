@@ -1,0 +1,6 @@
+a2fd3078d4705f879e7a377802c27ddd95d03077b1fb8ab76867fc0bfe13057d  acr-core_1.0.0_windows_amd64.zip
+118b5386fc6c37a18cf0bbe93f60f142241f7f562f211c509f8d846f30033dca  acr-core_1.0.0_windows_arm64.zip
+0b1b660fafb8fa2f8bb5487a7ce9769c0c0602da530bbf650ffedabfa47927b1  acr-core_1.0.0_linux_amd64.tar.gz
+17788f1632796a0a4ea500bcd7d71fda144e7815b481a1e532b2519c8e96091a  acr-core_1.0.0_linux_arm64.tar.gz
+0c5493d29f472f74a8a0fb85e1def5145b76218ba99a88fad701f41cda2ea8e1  acr-core_1.0.0_darwin_amd64.tar.gz
+7984801008ec3a61b980cef966f68d7e0960f3585f964907aa969083d7f6cbf8  acr-core_1.0.0_darwin_arm64.tar.gz
