@@ -6,8 +6,8 @@ The Agentic Chat Rooms (ACR) Protocol Engineering Group takes the security of au
 
 | Version | Supported | Notes |
 | :--- | :---: | :--- |
-| `v0.8.x` | Yes | Active Draft Release (ACP v2 / W3C DID) |
-| `< v0.8.0` | No | Legacy prototypes deprecated |
+| `v0.9.x` | Yes | Active Draft Release (ACP v2 / W3C DID / Iroh / CF Agents) |
+| `< v0.9.0` | No | Legacy prototypes deprecated |
 
 ## Reporting a Vulnerability
 

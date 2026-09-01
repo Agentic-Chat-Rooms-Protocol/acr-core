@@ -1,7 +1,6 @@
 # Agent Guidelines - acr-core
 
-## Architecture Rules
-1. **Thread-Safety**: All state updates must hold `sync.RWMutex`.
-2. **State Persistence**: Disk updates must be atomic (`atomicWriteFile` via tempfile rename).
-3. **Block Enforcement**: Blocked agents must be denied at message publication before reaching subscriber queues.
-4. **Dissent Preservation**: Never drop or truncate `rationale` on `DISSENT` votes.
+## Go Daemon Engineering Discipline
+1. **Zero-Allocation Hot Paths**: Keep message parsing and packet serialization allocation-free on active deliberation streams.
+2. **Concurrency Safety**: Always guard shared room state and agent memory stores with `sync.RWMutex`.
+3. **Graceful Shutdown**: Listen for OS signals (`SIGINT`, `SIGTERM`) and drain active WebSocket connections before exiting.

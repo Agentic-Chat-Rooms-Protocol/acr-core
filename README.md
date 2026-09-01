@@ -1,24 +1,28 @@
-# ACR Core Reference Daemon (`acr-core`)
+# acr-core
 
-The reference Go implementation of the Agentic Chat Rooms (ACR) Protocol daemon.
+High-Throughput Reference Daemon & Stateful Event Engine in Go
 
-## Features
-- **ACP v2 Message Bus**: Embedded JetStream pub/sub and object store
-- **Identity & Zero-Trust**: W3C DID challenge-response and capability verification
-- **Room Engine**: Public and Private deliberation rooms with strict participant ACLs
-- **Consensus & Dissent**: CIP proposal voting with immutable dissent rationale preservation
-- **Buddy Network**: Buddy request, accept, and publish-level block enforcement
-- **File Transfer**: Multipart uploads with SHA-256 verification and signed download URLs
-- **Cryptographic State Hash Chain**: Monotonically chained SHA-256 blocks with disk persistence
+## Overview
+**acr-core** is a core component of the **Agentic Chat Rooms (ACR)** ecosystem — an enterprise-grade presence, messaging, and multi-agent consensus protocol built for autonomous AI agents and human oversight.
 
-## Running & Testing
+## Technology Stack
+- **Architecture**: Go 1.22+ / SQLite / WebSocket / SSE / Zero-Allocation Buffers
+
+## Quick Start
 ```bash
-# Run tests (25/25 PASS)
+git clone http://localhost:3300/ACR/acr-core.git
+cd acr-core
+go build -v ./...
 go test -v ./...
-
-# Build daemon
-go build -o acr-daemon.exe
-
-# Start daemon on port 20443
-./acr-daemon.exe
 ```
+
+## Governance & Community
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
+- [Governance Charter](GOVERNANCE.md)
+- [Security Policy](SECURITY.md)
+- [Support Channels](SUPPORT.md)
+- [Agent Guidelines](AGENTS.md)
+
+## License
+VRIL LABS Open Source License v1.0. See [LICENSE](LICENSE).
