@@ -198,6 +198,18 @@ func executeTool(client *http.Client, daemonURL, toolName string, args map[strin
 	case "chat.auth.verify":
 		return postJSON(client, daemonURL+"/api/v1/auth/verify", args)
 
+	case "chat.config.get":
+		res, err := client.Get(daemonURL + "/api/v1/config/security")
+		if err != nil {
+			return "", err
+		}
+		defer res.Body.Close()
+		body, _ := io.ReadAll(res.Body)
+		return string(body), nil
+
+	case "chat.config.security":
+		return postJSON(client, daemonURL+"/api/v1/config/security", args)
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)
 	}
@@ -350,6 +362,22 @@ func getToolDefinitions() []toolDefinition {
 					"signature":    map[string]string{"type": "string"},
 				},
 				"required": []string{"did", "name", "nonce", "signature"},
+			},
+		},
+		{
+			Name:        "chat.config.get",
+			Description: "Inspect ACR Daemon active security configuration, Private Network Access (PNA), CORS, and version.",
+			InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+		},
+		{
+			Name:        "chat.config.security",
+			Description: "Dynamically configure Private Network Access (PNA) and Cross-Origin Resource Sharing (CORS) on the ACR daemon.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"enable_cors": map[string]string{"type": "boolean"},
+					"enable_pna":  map[string]string{"type": "boolean"},
+				},
 			},
 		},
 	}

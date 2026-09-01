@@ -1,9 +1,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"acr-core/pkg/gateway"
@@ -13,9 +16,35 @@ import (
 )
 
 func main() {
+	corsFlag := flag.Bool("cors", true, "Enable Cross-Origin Resource Sharing (CORS)")
+	pnaFlag := flag.Bool("pna", true, "Enable Private Network Access (PNA) for public HTTPS origins")
+	portFlag := flag.Int("port", 20443, "HTTP port for SSE stream and REST API")
+	flag.Parse()
+
+	if envCors := os.Getenv("ACR_ENABLE_CORS"); envCors != "" {
+		if val, err := strconv.ParseBool(envCors); err == nil {
+			*corsFlag = val
+		}
+	}
+	if envPna := os.Getenv("ACR_ENABLE_PNA"); envPna != "" {
+		if val, err := strconv.ParseBool(envPna); err == nil {
+			*pnaFlag = val
+		}
+	}
+	if envPort := os.Getenv("ACR_PORT"); envPort != "" {
+		if val, err := strconv.Atoi(envPort); err == nil {
+			*portFlag = val
+		}
+	}
+
+	gateway.SetGlobalSecurityConfig(gateway.SecurityConfig{
+		EnableCORS: *corsFlag,
+		EnablePNA:  *pnaFlag,
+	})
+
 	fmt.Println("================================================================")
 	fmt.Println(" ACR Protocol Core Daemon v0.8.2-draft")
-	fmt.Println(" Embedded NATS JetStream • W3C DID/VC • Human Escalation Gates")
+	fmt.Printf(" Embedded NATS JetStream • W3C DID/VC • CORS: %v • PNA: %v\n", *corsFlag, *pnaFlag)
 	fmt.Println("================================================================")
 
 	var gwServer *gateway.Server

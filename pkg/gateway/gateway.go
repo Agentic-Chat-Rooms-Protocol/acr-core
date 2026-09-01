@@ -14,12 +14,20 @@ import (
 	"acr-core/pkg/models"
 )
 
+// SecurityConfig governs Cross-Origin Resource Sharing (CORS) and Private Network Access (PNA).
+type SecurityConfig struct {
+	EnableCORS bool `json:"enable_cors"`
+	EnablePNA  bool `json:"enable_pna"`
+}
+
 // Server provides SSE streaming and REST APIs for human frontends.
 type Server struct {
-	mcpServer *mcp.Server
-	govEngine *governance.Engine
-	mu        sync.RWMutex
-	clients   map[chan []byte]bool
+	mcpServer      *mcp.Server
+	govEngine      *governance.Engine
+	mu             sync.RWMutex
+	clients        map[chan []byte]bool
+	securityMu     sync.RWMutex
+	securityConfig SecurityConfig
 }
 
 // NewServer creates a new gateway server.
@@ -28,7 +36,25 @@ func NewServer(mcpServer *mcp.Server, govEngine *governance.Engine) *Server {
 		mcpServer: mcpServer,
 		govEngine: govEngine,
 		clients:   make(map[chan []byte]bool),
+		securityConfig: SecurityConfig{
+			EnableCORS: true,
+			EnablePNA:  true,
+		},
 	}
+}
+
+// GetSecurityConfig returns the active security configuration.
+func (s *Server) GetSecurityConfig() SecurityConfig {
+	s.securityMu.RLock()
+	defer s.securityMu.RUnlock()
+	return s.securityConfig
+}
+
+// SetSecurityConfig updates CORS and PNA settings dynamically at runtime.
+func (s *Server) SetSecurityConfig(cfg SecurityConfig) {
+	s.securityMu.Lock()
+	defer s.securityMu.Unlock()
+	s.securityConfig = cfg
 }
 
 // BroadcastMessage sends a message to all connected SSE clients.
@@ -113,16 +139,47 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/proposals", s.handleProposals)
 	mux.HandleFunc("/api/v1/proposals/", s.handleProposalSubroutes)
 
+	// Config & Security Policy (PNA / CORS)
+	mux.HandleFunc("/api/v1/config/security", s.handleSecurityConfig)
+	mux.HandleFunc("/api/v1/config", s.handleSecurityConfig)
+
 	// Files / Object Storage (GAP-17)
 	mux.HandleFunc("/api/v1/files/upload", s.handleFileUpload)
 	mux.HandleFunc("/api/v1/files/", s.handleFileDownload)
 }
 
+var (
+	globalSecurityMu     sync.RWMutex
+	globalSecurityConfig = SecurityConfig{
+		EnableCORS: true,
+		EnablePNA:  true,
+	}
+)
+
+// GetGlobalSecurityConfig returns the current global security configuration.
+func GetGlobalSecurityConfig() SecurityConfig {
+	globalSecurityMu.RLock()
+	defer globalSecurityMu.RUnlock()
+	return globalSecurityConfig
+}
+
+// SetGlobalSecurityConfig updates the global security configuration.
+func SetGlobalSecurityConfig(cfg SecurityConfig) {
+	globalSecurityMu.Lock()
+	defer globalSecurityMu.Unlock()
+	globalSecurityConfig = cfg
+}
+
 func corsHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-ACR-Session, X-ACR-Client")
-	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	cfg := GetGlobalSecurityConfig()
+	if cfg.EnableCORS {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-ACR-Session, X-ACR-Client")
+	}
+	if cfg.EnablePNA {
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	}
 }
 
 // CorsMiddleware wraps an http.Handler with Private Network Access (PNA) and CORS support.
@@ -141,6 +198,50 @@ func jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	corsHeaders(w)
 	json.NewEncoder(w).Encode(data)
+}
+
+func (s *Server) handleSecurityConfig(w http.ResponseWriter, r *http.Request) {
+	corsHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		var req struct {
+			EnableCORS *bool `json:"enable_cors"`
+			EnablePNA  *bool `json:"enable_pna"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			current := GetGlobalSecurityConfig()
+			if req.EnableCORS != nil {
+				current.EnableCORS = *req.EnableCORS
+			}
+			if req.EnablePNA != nil {
+				current.EnablePNA = *req.EnablePNA
+			}
+			SetGlobalSecurityConfig(current)
+			s.SetSecurityConfig(current)
+		}
+	}
+
+	cfg := GetGlobalSecurityConfig()
+	pnaStatus := "disabled"
+	if cfg.EnablePNA {
+		pnaStatus = "active"
+	}
+	corsStatus := "disabled"
+	if cfg.EnableCORS {
+		corsStatus = "active"
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"enable_cors": cfg.EnableCORS,
+		"enable_pna":  cfg.EnablePNA,
+		"cors_status": corsStatus,
+		"pna_status":  pnaStatus,
+		"version":     "v0.8.2-draft",
+	})
 }
 
 // ===== SSE =====
