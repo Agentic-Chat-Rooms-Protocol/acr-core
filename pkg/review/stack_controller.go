@@ -187,7 +187,7 @@ func (sc *StackController) finalizeStack(ctx context.Context, stack *Stack) erro
 	}
 
 	envJSON, _ := marshalEnvelope(env)
-	commentBody := fmt.Sprintf("## ✅ ACR Consensus Proof\n\n```json\n%s\n```", envJSON)
+	commentBody := fmt.Sprintf("## ACR Consensus Proof\n\n```json\n%s\n```", envJSON)
 
 	owner, repoName, _ := splitRepo(stack.Repo)
 	if sc.gitea != nil {
