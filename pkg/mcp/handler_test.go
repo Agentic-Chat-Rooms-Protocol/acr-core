@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -99,6 +100,30 @@ func TestChallengeResponseNoSignature(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for missing signature")
+	}
+
+	// Challenge must have been atomically burned on the failed attempt above
+	_, err = s.VerifyAndRegister(models.AuthVerifyRequest{
+		DID:       "did:key:z6Mknosig",
+		Name:      "NoSigBot",
+		Nonce:     challenge.Nonce,
+		Signature: "late-signature-replay",
+	})
+	if err == nil {
+		t.Error("expected challenge nonce to be burned after failed verification attempt")
+	}
+}
+
+func TestAutoAdminEscalationBypassRejected(t *testing.T) {
+	s := newTestServer()
+	for _, forgedDID := range []string{
+		"did:key:z6Mk_unregistered_operator",
+		"did:key:z6Mk_unregistered_root",
+		"did:key:z6Mk_unregistered_local",
+	} {
+		if _, err := s.SendMessage("consensus-main", forgedDID, "bypass attempt", nil); err == nil {
+			t.Fatalf("expected unregistered DID %s to be rejected, but message succeeded", forgedDID)
+		}
 	}
 }
 
@@ -496,6 +521,9 @@ func TestVotingAndDissent(t *testing.T) {
 }
 
 func TestFileUploadAndDownload(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.RemoveAll("data")
+	})
 	s := newTestServer()
 
 	data := []byte("ACR AST diff binary representation v0.8.2")

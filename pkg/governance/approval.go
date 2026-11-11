@@ -163,3 +163,30 @@ func (g *ApprovalGate) IsAuthorized(actionID string, allowedDeciders []string) b
 
 	return approved
 }
+
+// RecordWithConsent verifies a request-bound PasskeyConsentEnvelope (consuming its challenge nonce atomically)
+// before recording a SignedDecision on the ApprovalGate.
+func (g *ApprovalGate) RecordWithConsent(
+	store *ConsentChallengeStore,
+	d SignedDecision,
+	env *PasskeyConsentEnvelope,
+	pubKey ed25519.PublicKey,
+	expectedReqHash, expectedAction, expectedTargetURI, currentResourceVer, currentPolicyRev string,
+	now time.Time,
+) error {
+	if err := VerifyAndConsumeConsent(
+		store,
+		env,
+		pubKey,
+		expectedReqHash,
+		expectedAction,
+		expectedTargetURI,
+		currentResourceVer,
+		currentPolicyRev,
+		now,
+	); err != nil {
+		return err
+	}
+	return g.Record(d)
+}
+

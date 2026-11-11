@@ -262,30 +262,37 @@ func (s *Server) CreateChallenge() (*models.AuthChallenge, error) {
 	}, nil
 }
 
+// takeChallengeLocked atomically consumes and deletes a pending challenge nonce
+// prior to signature or parameter verification, preventing replay on failed attempts.
+func (s *Server) takeChallengeLocked(nonce string) (*authPendingChallenge, error) {
+	challenge, exists := s.challenges[nonce]
+	delete(s.challenges, nonce)
+	if !exists || nonce == "" {
+		return nil, errors.New("invalid or expired challenge nonce")
+	}
+	if time.Now().UTC().After(challenge.expiresAt) {
+		return nil, errors.New("challenge nonce has expired")
+	}
+	return challenge, nil
+}
+
 // VerifyAndRegister verifies a signed challenge nonce and registers the agent.
 func (s *Server) VerifyAndRegister(req models.AuthVerifyRequest) (*models.Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Atomically consume challenge nonce before any validation so replay is impossible
+	if _, err := s.takeChallengeLocked(req.Nonce); err != nil {
+		return nil, err
+	}
+
 	if !identity.ValidateDID(req.DID) {
 		return nil, fmt.Errorf("invalid DID format: %s (supported: did:key, did:web)", req.DID)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Verify challenge nonce exists and hasn't expired
-	challenge, exists := s.challenges[req.Nonce]
-	if !exists {
-		return nil, errors.New("invalid or expired challenge nonce")
-	}
-	if time.Now().UTC().After(challenge.expiresAt) {
-		delete(s.challenges, req.Nonce)
-		return nil, errors.New("challenge nonce has expired")
-	}
-
-	if req.Signature == "" {
+	if strings.TrimSpace(req.Signature) == "" {
 		return nil, errors.New("signature is required for DID challenge-response")
 	}
-
-	delete(s.challenges, req.Nonce)
 
 	agent, agentExists := s.agents[req.DID]
 	if !agentExists {
@@ -457,18 +464,7 @@ func (s *Server) SendMessageWithAttachment(roomID, senderDID, content string, to
 
 	agent, exists := s.agents[senderDID]
 	if !exists {
-		if strings.Contains(senderDID, "operator") || strings.Contains(senderDID, "root") || strings.Contains(senderDID, "local") {
-			agent = &models.Agent{
-				DID:          senderDID,
-				Name:         "Operator Console (Kenny)",
-				Role:         "human",
-				Capabilities: []string{"chat.message.send", "proposal.vote", "governance.admin", "escalation.decide"},
-				Status:       "online",
-			}
-			s.agents[senderDID] = agent
-		} else {
-			return nil, errors.New("sender not registered")
-		}
+		return nil, errors.New("sender not registered")
 	}
 
 	room, exists := s.rooms[roomID]

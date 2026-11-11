@@ -1,8 +1,11 @@
 package governance
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +59,10 @@ func (e *Engine) RequestEscalation(req models.Escalation) (*models.Escalation, e
 
 // ResolveEscalation signs off or rejects an escalation gate.
 func (e *Engine) ResolveEscalation(id string, approve bool, operatorDID, signature string) (*models.Escalation, error) {
+	if strings.TrimSpace(operatorDID) == "" || strings.TrimSpace(signature) == "" {
+		return nil, errors.New("operatorDID and cryptographic signature are required to resolve escalation")
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -88,6 +95,51 @@ func (e *Engine) ResolveEscalation(id string, approve bool, operatorDID, signatu
 	}
 
 	return esc, nil
+}
+
+// ResolveEscalationWithConsent verifies a request-bound PasskeyConsentEnvelope before resolving an escalation gate.
+func (e *Engine) ResolveEscalationWithConsent(
+	store *ConsentChallengeStore,
+	id string,
+	approve bool,
+	env *PasskeyConsentEnvelope,
+	pubKey ed25519.PublicKey,
+	currentResourceVer, currentPolicyRev string,
+	now time.Time,
+) (*models.Escalation, error) {
+	e.mu.RLock()
+	esc, exists := e.escalations[id]
+	var expectedReqHash, expectedAction, expectedTarget string
+	if exists {
+		expectedReqHash = HashCanonicalRequest(esc.Payload)
+		expectedAction = esc.Action
+		expectedTarget = esc.RoomID
+	}
+	e.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("escalation with id %s not found", id)
+	}
+
+	if err := VerifyAndConsumeConsent(
+		store,
+		env,
+		pubKey,
+		expectedReqHash,
+		expectedAction,
+		expectedTarget,
+		currentResourceVer,
+		currentPolicyRev,
+		now,
+	); err != nil {
+		e.RecordAudit("CONSENT_VERIFICATION_REJECTED", env.OperatorDID, expectedTarget, map[string]string{
+			"escalation_id": id,
+			"reason":        err.Error(),
+		})
+		return nil, err
+	}
+
+	return e.ResolveEscalation(id, approve, env.OperatorDID, env.Signature)
 }
 
 // GetPendingEscalations returns all unapproved/unrejected gates.
