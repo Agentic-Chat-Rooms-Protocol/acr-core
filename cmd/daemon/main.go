@@ -16,6 +16,13 @@ import (
 	"acr-core/pkg/mcp"
 	"acr-core/pkg/models"
 	"acr-core/pkg/review"
+	pkgversion "acr-core/pkg/version"
+)
+
+var (
+	version = pkgversion.Default
+	commit  = "none"
+	date    = "unknown"
 )
 
 func splitCSVEnv(v string) []string {
@@ -41,20 +48,136 @@ func isLoopbackBindHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func isWildcardBindHost(host string) bool {
+	h := strings.TrimSpace(strings.Trim(host, "[]"))
+	if h == "" || h == "*" || h == "0.0.0.0" || h == "::" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsUnspecified()
+}
+
+type daemonSecurityOpts struct {
+	Bind              string
+	AllowNonLoopback  bool
+	RequireAuth       bool
+	ExplicitToken     string
+	TokenPath         string
+	EnableCORS        bool
+	CORSExplicitlySet bool
+	EnablePNA         bool
+	AllowedOrigins    []string
+	AllowedHosts      []string
+}
+
+func sanitizeAllowlist(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" || trimmed == "*" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func buildSecurityConfig(opts daemonSecurityOpts) (gateway.SecurityConfig, string, error) {
+	bindHost := strings.TrimSpace(opts.Bind)
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+
+	explicitToken := strings.TrimSpace(opts.ExplicitToken)
+	var fileToken string
+	var tokenWarning string
+	if explicitToken == "" {
+		tok, _, err := gateway.EnsureAPITokenFile(opts.TokenPath)
+		if err != nil {
+			if opts.RequireAuth || !isLoopbackBindHost(bindHost) {
+				return gateway.SecurityConfig{}, "", fmt.Errorf("failed to provision local api token: %w", err)
+			}
+			tokenWarning = fmt.Sprintf("could not provision ~/.acr/api-token (%v); running without local auth token", err)
+		} else {
+			fileToken = tok
+		}
+	}
+
+	var apiToken string
+	enforceAuth := opts.RequireAuth || explicitToken != "" || !isLoopbackBindHost(bindHost)
+	if explicitToken != "" {
+		apiToken = explicitToken
+	} else if enforceAuth {
+		apiToken = fileToken
+	}
+
+	if enforceAuth && strings.TrimSpace(apiToken) == "" {
+		return gateway.SecurityConfig{}, "", fmt.Errorf("local API auth required but token is empty")
+	}
+
+	allowedHosts := sanitizeAllowlist(opts.AllowedHosts)
+	allowedOrigins := sanitizeAllowlist(opts.AllowedOrigins)
+	if !isLoopbackBindHost(bindHost) {
+		if !opts.AllowNonLoopback {
+			return gateway.SecurityConfig{}, "", fmt.Errorf("refusing non-loopback bind %q without -allow-nonloopback", bindHost)
+		}
+		if isWildcardBindHost(bindHost) && len(allowedHosts) == 0 {
+			return gateway.SecurityConfig{}, "", fmt.Errorf("refusing wildcard non-loopback bind %q without at least one -allowed-hosts entry", bindHost)
+		}
+		if !isWildcardBindHost(bindHost) {
+			allowedHosts = append(allowedHosts, bindHost)
+		}
+	}
+
+	enableCORS := opts.EnableCORS
+	if len(allowedOrigins) > 0 && !opts.CORSExplicitlySet {
+		enableCORS = true
+	}
+
+	var warning string
+	if !enforceAuth {
+		if tokenWarning != "" {
+			warning = tokenWarning
+		} else {
+			warning = "unauthenticated local access is deprecated; ~/.acr/api-token provisioned (pass -require-auth or set ACR_REQUIRE_AUTH=true to enforce)"
+		}
+	}
+
+	return gateway.SecurityConfig{
+		EnableCORS:     enableCORS,
+		EnablePNA:      opts.EnablePNA,
+		RequireAuth:    enforceAuth,
+		APIToken:       apiToken,
+		AllowedOrigins: allowedOrigins,
+		AllowedHosts:   allowedHosts,
+	}, warning, nil
+}
+
 func main() {
-	corsFlag := flag.Bool("cors", true, "Enable Cross-Origin Resource Sharing (CORS)")
-	pnaFlag := flag.Bool("pna", true, "Enable Private Network Access (PNA) for allowlisted HTTPS origins")
+	pkgversion.Set(version)
+
+	corsFlag := flag.Bool("cors", false, "Enable Cross-Origin Resource Sharing (CORS) for allowlisted origins")
+	pnaFlag := flag.Bool("pna", false, "Enable Private Network Access (PNA) for allowlisted HTTPS origins")
 	portFlag := flag.Int("port", 20443, "HTTP port for SSE stream and REST API")
 	bindFlag := flag.String("bind", "127.0.0.1", "Interface IP or host to bind (loopback by default)")
-	allowNonLoopback := flag.Bool("allow-nonloopback", false, "Allow binding to non-loopback addresses (requires -api-token / ACR_API_TOKEN)")
-	apiTokenFlag := flag.String("api-token", "", "Optional Bearer API token protecting gateway endpoints (required for non-loopback bind)")
+	allowNonLoopback := flag.Bool("allow-nonloopback", false, "Allow binding to non-loopback addresses (requires enforced local API auth)")
+	requireAuthFlag := flag.Bool("require-auth", false, "Enforce Bearer API token from -api-token / ACR_API_TOKEN / ~/.acr/api-token")
+	apiTokenFlag := flag.String("api-token", "", "Explicit Bearer API token protecting gateway endpoints (implies -require-auth)")
 	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated additional CORS origins to allow")
 	allowedHostsFlag := flag.String("allowed-hosts", "", "Comma-separated additional Host header values to allow")
 	flag.Parse()
 
+	corsExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "cors" {
+			corsExplicit = true
+		}
+	})
+
 	if envCors := os.Getenv("ACR_ENABLE_CORS"); envCors != "" {
 		if val, err := strconv.ParseBool(envCors); err == nil {
 			*corsFlag = val
+			corsExplicit = true
 		}
 	}
 	if envPna := os.Getenv("ACR_ENABLE_PNA"); envPna != "" {
@@ -75,40 +198,43 @@ func main() {
 			*allowNonLoopback = val
 		}
 	}
+	if envRequireAuth := os.Getenv("ACR_REQUIRE_AUTH"); envRequireAuth != "" {
+		if val, err := strconv.ParseBool(envRequireAuth); err == nil {
+			*requireAuthFlag = val
+		}
+	}
 	if *apiTokenFlag == "" {
 		*apiTokenFlag = os.Getenv("ACR_API_TOKEN")
-	}
-
-	if !isLoopbackBindHost(*bindFlag) {
-		if !*allowNonLoopback {
-			log.Fatalf("Refusing non-loopback bind %q without -allow-nonloopback", *bindFlag)
-		}
-		if strings.TrimSpace(*apiTokenFlag) == "" {
-			log.Fatalf("Refusing non-loopback bind %q without -api-token or ACR_API_TOKEN", *bindFlag)
-		}
 	}
 
 	allowedOrigins := splitCSVEnv(*allowedOriginsFlag)
 	allowedOrigins = append(allowedOrigins, splitCSVEnv(os.Getenv("ACR_ALLOWED_ORIGINS"))...)
 	allowedHosts := splitCSVEnv(*allowedHostsFlag)
 	allowedHosts = append(allowedHosts, splitCSVEnv(os.Getenv("ACR_ALLOWED_HOSTS"))...)
-	if !isLoopbackBindHost(*bindFlag) {
-		allowedHosts = append(allowedHosts, *bindFlag)
-	}
 
-	secCfg := gateway.SecurityConfig{
-		EnableCORS:     *corsFlag,
-		EnablePNA:      *pnaFlag,
-		APIToken:       strings.TrimSpace(*apiTokenFlag),
-		AllowedOrigins: allowedOrigins,
-		AllowedHosts:   allowedHosts,
+	secCfg, warnMsg, err := buildSecurityConfig(daemonSecurityOpts{
+		Bind:              *bindFlag,
+		AllowNonLoopback:  *allowNonLoopback,
+		RequireAuth:       *requireAuthFlag,
+		ExplicitToken:     *apiTokenFlag,
+		EnableCORS:        *corsFlag,
+		CORSExplicitlySet: corsExplicit,
+		EnablePNA:         *pnaFlag,
+		AllowedOrigins:    allowedOrigins,
+		AllowedHosts:      allowedHosts,
+	})
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
 	gateway.SetGlobalSecurityConfig(secCfg)
 
 	fmt.Println("================================================================")
-	fmt.Println(" ACR Protocol Core Daemon v0.8.2-draft")
-	fmt.Printf(" Embedded NATS JetStream • W3C DID/VC • CORS: %v • PNA: %v\n", *corsFlag, *pnaFlag)
+	fmt.Printf(" ACR Protocol Core Daemon %s\n", pkgversion.Get())
+	fmt.Printf(" Embedded NATS JetStream • W3C DID/VC • CORS: %v • PNA: %v • Auth: %v\n", secCfg.EnableCORS, secCfg.EnablePNA, secCfg.RequireAuth)
 	fmt.Println("================================================================")
+	if warnMsg != "" {
+		log.Printf("[ACR Core] WARNING: %s", warnMsg)
+	}
 
 	var gwServer *gateway.Server
 

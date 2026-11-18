@@ -9,7 +9,7 @@ before:
 
 builds:
   - id: acr-daemon
-    main: ./cmd/daemon/main.go
+    main: ./cmd/daemon
     binary: acr-daemon
     env:
       - CGO_ENABLED=0
@@ -20,11 +20,34 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+  - id: acr-mcp-server
+    main: ./cmd/mcp-server
+    binary: acr-mcp-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
 archives:
-  - name_template: >-
+  - id: default
+    builds:
+      - acr-daemon
+      - acr-mcp-server
+    name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
@@ -36,6 +59,10 @@ archives:
 
 checksum:
   name_template: 'checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
 
 changelog:
   sort: asc
@@ -43,6 +70,7 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
+      - '^chore:'
       - Merge pull request
       - Merge branch
 

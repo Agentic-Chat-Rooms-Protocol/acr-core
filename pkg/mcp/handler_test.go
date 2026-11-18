@@ -341,8 +341,8 @@ func TestHealth(t *testing.T) {
 	_, _ = s.Register("did:key:z6Mkh1", "Bot", "", "agent", "", nil)
 
 	health := s.GetHealth()
-	if health.Version != "v0.8.2-draft" {
-		t.Errorf("expected version v0.8.2-draft, got %s", health.Version)
+	if health.Version != "v1.1.0" {
+		t.Errorf("expected version v1.1.0, got %s", health.Version)
 	}
 	if health.AgentCount != 1 {
 		t.Errorf("expected 1 agent, got %d", health.AgentCount)

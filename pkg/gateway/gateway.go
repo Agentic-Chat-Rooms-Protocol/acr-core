@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"acr-core/pkg/governance"
 	"acr-core/pkg/mcp"
 	"acr-core/pkg/models"
+	"acr-core/pkg/version"
 )
 
 const maxUploadBytes int64 = 10 << 20 // 10 MiB
@@ -24,6 +26,7 @@ const maxUploadBytes int64 = 10 << 20 // 10 MiB
 type SecurityConfig struct {
 	EnableCORS     bool     `json:"enable_cors"`
 	EnablePNA      bool     `json:"enable_pna"`
+	RequireAuth    bool     `json:"require_auth"`
 	APIToken       string   `json:"-"`
 	AllowedOrigins []string `json:"allowed_origins,omitempty"`
 	AllowedHosts   []string `json:"allowed_hosts,omitempty"`
@@ -46,8 +49,8 @@ func NewServer(mcpServer *mcp.Server, govEngine *governance.Engine) *Server {
 		govEngine: govEngine,
 		clients:   make(map[chan []byte]bool),
 		securityConfig: SecurityConfig{
-			EnableCORS: true,
-			EnablePNA:  true,
+			EnableCORS: false,
+			EnablePNA:  false,
 		},
 	}
 }
@@ -160,8 +163,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 var (
 	globalSecurityMu     sync.RWMutex
 	globalSecurityConfig = SecurityConfig{
-		EnableCORS: true,
-		EnablePNA:  true,
+		EnableCORS: false,
+		EnablePNA:  false,
 	}
 )
 
@@ -190,16 +193,39 @@ func extractHostname(hostHeader string) string {
 	return strings.ToLower(strings.Trim(h, "[]"))
 }
 
-func isHostAllowed(r *http.Request, cfg SecurityConfig) bool {
-	if r.Host == "" {
+func isLoopbackRemoteAddr(remoteAddr string) bool {
+	if strings.TrimSpace(remoteAddr) == "" {
+		return false
+	}
+	host := remoteAddr
+	if parsedHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isHostAllowed(r *http.Request, cfg SecurityConfig) bool {
+	if strings.TrimSpace(r.Host) == "" {
+		return false
+	}
 	host := extractHostname(r.Host)
+	if host == "" {
+		return false
+	}
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return true
 	}
 	for _, allowed := range cfg.AllowedHosts {
-		if extractHostname(allowed) == host {
+		ah := extractHostname(allowed)
+		if ah == "" || ah == "*" {
+			continue
+		}
+		if ah == host {
 			return true
 		}
 	}
@@ -211,7 +237,11 @@ func isOriginAllowed(origin string, cfg SecurityConfig) bool {
 		return false
 	}
 	for _, extra := range cfg.AllowedOrigins {
-		if strings.EqualFold(strings.TrimSpace(extra), origin) {
+		trimmed := strings.TrimSpace(extra)
+		if trimmed == "" || trimmed == "*" {
+			continue
+		}
+		if strings.EqualFold(trimmed, origin) {
 			return true
 		}
 	}
@@ -230,12 +260,13 @@ func isOriginAllowed(origin string, cfg SecurityConfig) bool {
 }
 
 func isPublicRoute(path string) bool {
-	return path == "/health" || path == "/healthz" || path == "/api/v1/health" || path == "/api/v1/auth/challenge" || path == "/webhooks/gitea"
+	return path == "/health" || path == "/healthz" || path == "/api/v1/health" ||
+		path == "/api/v1/auth/challenge" || path == "/api/v1/auth/verify"
 }
 
 func hasValidBearerToken(r *http.Request, expected string) bool {
 	if expected == "" {
-		return true
+		return false
 	}
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
@@ -243,24 +274,29 @@ func hasValidBearerToken(r *http.Request, expected string) bool {
 		return false
 	}
 	provided := strings.TrimPrefix(auth, prefix)
+	if provided == "" {
+		return false
+	}
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
 
 func corsHeaders(w http.ResponseWriter) {
 	// Handlers must not re-introduce wildcard '*' origins; CorsMiddleware writes validated Origin/PNA headers.
-	w.Header().Add("Vary", "Origin")
+	w.Header().Set("Vary", "Origin")
 }
 
 // CorsMiddleware wraps an http.Handler with Host/Origin validation, Private Network Access (PNA), CORS, and optional Bearer auth.
 func CorsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := GetGlobalSecurityConfig()
-		w.Header().Add("Vary", "Origin")
+		w.Header().Set("Vary", "Origin")
 
 		if !isHostAllowed(r, cfg) {
 			http.Error(w, "Forbidden host", http.StatusForbidden)
 			return
 		}
+
+		enforceAuth := cfg.RequireAuth || cfg.APIToken != ""
 
 		origin := r.Header.Get("Origin")
 		if origin != "" {
@@ -276,17 +312,17 @@ func CorsMiddleware(next http.Handler) http.Handler {
 			if cfg.EnablePNA && r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Private-Network", "true")
 			}
-		} else if r.Method == http.MethodOptions {
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		} else if r.Method == http.MethodOptions && !enforceAuth {
 			http.Error(w, "Origin header required for preflight", http.StatusForbidden)
 			return
 		}
 
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		if cfg.APIToken != "" && !isPublicRoute(r.URL.Path) && !hasValidBearerToken(r, cfg.APIToken) {
+		if enforceAuth && !isPublicRoute(r.URL.Path) && !hasValidBearerToken(r, cfg.APIToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="acr-local"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -307,23 +343,49 @@ func (s *Server) handleSecurityConfig(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		if !isLoopbackRemoteAddr(r.RemoteAddr) {
+			http.Error(w, "Forbidden: loopback peer required", http.StatusForbidden)
+			return
+		}
+		if r.Header.Get("Origin") != "" {
+			http.Error(w, "Forbidden: Origin header not permitted for security config mutation", http.StatusForbidden)
+			return
+		}
+		cfg := GetGlobalSecurityConfig()
+		if (cfg.RequireAuth || cfg.APIToken != "") && !hasValidBearerToken(r, cfg.APIToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="acr-local"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			http.Error(w, "Unsupported Media Type: application/json required", http.StatusUnsupportedMediaType)
+			return
+		}
+
 		var req struct {
 			EnableCORS *bool `json:"enable_cors"`
 			EnablePNA  *bool `json:"enable_pna"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			current := GetGlobalSecurityConfig()
-			if req.EnableCORS != nil {
-				current.EnableCORS = *req.EnableCORS
-			}
-			if req.EnablePNA != nil {
-				current.EnablePNA = *req.EnablePNA
-			}
-			SetGlobalSecurityConfig(current)
-			s.SetSecurityConfig(current)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
 		}
+		current := GetGlobalSecurityConfig()
+		if req.EnableCORS != nil {
+			current.EnableCORS = *req.EnableCORS
+		}
+		if req.EnablePNA != nil {
+			current.EnablePNA = *req.EnablePNA
+		}
+		SetGlobalSecurityConfig(current)
+		s.SetSecurityConfig(current)
 	}
 
 	cfg := GetGlobalSecurityConfig()
@@ -337,11 +399,12 @@ func (s *Server) handleSecurityConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, map[string]interface{}{
-		"enable_cors": cfg.EnableCORS,
-		"enable_pna":  cfg.EnablePNA,
-		"cors_status": corsStatus,
-		"pna_status":  pnaStatus,
-		"version":     "v0.8.2-draft",
+		"enable_cors":  cfg.EnableCORS,
+		"enable_pna":   cfg.EnablePNA,
+		"require_auth": cfg.RequireAuth || cfg.APIToken != "",
+		"cors_status":  corsStatus,
+		"pna_status":   pnaStatus,
+		"version":      version.Get(),
 	})
 }
 
@@ -351,7 +414,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	corsHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {

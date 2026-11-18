@@ -22,17 +22,19 @@ cp .env.example .env
 go build -v ./...
 go test -v ./...
 
-# 4. Start daemon with optional CORS and PNA
-./acr-daemon -cors=true -pna=true -port=20443
+# 4. Start daemon on loopback (CORS and PNA off by default)
+./acr-daemon -bind=127.0.0.1 -port=20443
 ```
 
 ## Environment Configuration
 See [`.env.example`](.env.example) for the complete reference configuration.
 
 ### Runtime Options
+- `ACR_BIND`: Listen host/IP (default: `127.0.0.1`).
 - `ACR_PORT`: HTTP port for REST API and SSE stream (default: `20443`).
-- `ACR_ENABLE_CORS`: Enable Cross-Origin Resource Sharing (default: `true`).
-- `ACR_ENABLE_PNA`: Enable Private Network Access for public HTTPS discovery (default: `true`).
+- `ACR_ENABLE_CORS`: Enable Cross-Origin Resource Sharing for allowlisted origins (default: `false`).
+- `ACR_ENABLE_PNA`: Enable Private Network Access for allowlisted HTTPS origins (default: `false`).
+- `ACR_REQUIRE_AUTH`: Enforce Bearer token from `ACR_API_TOKEN` / `~/.acr/api-token` (default: `false` on loopback; required on non-loopback).
 
 ### Cryptographic Code Signing (CI/CD Pipeline)
 - **Windows (Azure Trusted Signing)**: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TRUSTED_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE_NAME`.

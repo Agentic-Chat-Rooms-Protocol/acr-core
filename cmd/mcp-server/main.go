@@ -6,14 +6,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"time"
+	"strings"
+
+	"acr-core/pkg/gateway"
+	"acr-core/pkg/mcpendpoint"
+	pkgversion "acr-core/pkg/version"
 )
 
 const (
-	defaultDaemonURL = "http://localhost:20443"
+	defaultDaemonURL = "http://127.0.0.1:20443"
 	protocolVersion  = "2024-11-05"
+)
+
+var (
+	version = pkgversion.Default
+	commit  = "none"
+	date    = "unknown"
 )
 
 type jsonRPCRequest struct {
@@ -41,15 +53,46 @@ type toolDefinition struct {
 	InputSchema interface{} `json:"inputSchema"`
 }
 
+type daemonClient struct {
+	httpClient *http.Client
+	baseURL    string
+	apiToken   string
+	out        io.Writer
+}
+
+func resolveDaemonURL(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		raw = defaultDaemonURL
+	}
+	return mcpendpoint.ValidateLocal(raw)
+}
+
+func newDaemonClient(rawURL, apiToken string, out io.Writer) (*daemonClient, error) {
+	validatedURL, err := resolveDaemonURL(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ACR_DAEMON_URL %q: %w", rawURL, err)
+	}
+	if out == nil {
+		out = os.Stdout
+	}
+	return &daemonClient{
+		httpClient: mcpendpoint.NewHTTPClient(),
+		baseURL:    validatedURL,
+		apiToken:   strings.TrimSpace(apiToken),
+		out:        out,
+	}, nil
+}
+
 func main() {
-	daemonURL := os.Getenv("ACR_DAEMON_URL")
-	if daemonURL == "" {
-		daemonURL = defaultDaemonURL
+	pkgversion.Set(version)
+
+	token := gateway.LoadAPIToken(os.Getenv("ACR_API_TOKEN"), "")
+	dc, err := newDaemonClient(os.Getenv("ACR_DAEMON_URL"), token, os.Stdout)
+	if err != nil {
+		log.Fatalf("acr-mcp-server startup failed: %v", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	scanner := bufio.NewScanner(os.Stdin)
-
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -58,25 +101,25 @@ func main() {
 
 		var req jsonRPCRequest
 		if err := json.Unmarshal(line, &req); err != nil {
-			sendError(nil, -32700, "Parse error")
+			dc.sendError(nil, -32700, "Parse error")
 			continue
 		}
 
-		handleRequest(client, daemonURL, req)
+		dc.handleRequest(req)
 	}
 }
 
-func handleRequest(client *http.Client, daemonURL string, req jsonRPCRequest) {
+func (dc *daemonClient) handleRequest(req jsonRPCRequest) {
 	switch req.Method {
 	case "initialize":
-		sendResult(req.ID, map[string]interface{}{
+		dc.sendResult(req.ID, map[string]interface{}{
 			"protocolVersion": protocolVersion,
 			"capabilities": map[string]interface{}{
 				"tools": map[string]bool{"listChanged": false},
 			},
 			"serverInfo": map[string]string{
 				"name":    "acr-mcp-server",
-				"version": "v0.8.2-draft",
+				"version": pkgversion.Get(),
 			},
 		})
 
@@ -85,7 +128,7 @@ func handleRequest(client *http.Client, daemonURL string, req jsonRPCRequest) {
 
 	case "tools/list":
 		tools := getToolDefinitions()
-		sendResult(req.ID, map[string]interface{}{"tools": tools})
+		dc.sendResult(req.ID, map[string]interface{}{"tools": tools})
 
 	case "tools/call":
 		var callParams struct {
@@ -93,13 +136,13 @@ func handleRequest(client *http.Client, daemonURL string, req jsonRPCRequest) {
 			Arguments map[string]interface{} `json:"arguments"`
 		}
 		if err := json.Unmarshal(req.Params, &callParams); err != nil {
-			sendError(req.ID, -32602, "Invalid params")
+			dc.sendError(req.ID, -32602, "Invalid params")
 			return
 		}
 
-		resultText, err := executeTool(client, daemonURL, callParams.Name, callParams.Arguments)
+		resultText, err := dc.executeTool(callParams.Name, callParams.Arguments)
 		if err != nil {
-			sendResult(req.ID, map[string]interface{}{
+			dc.sendResult(req.ID, map[string]interface{}{
 				"content": []map[string]interface{}{
 					{"type": "text", "text": fmt.Sprintf("Error: %v", err)},
 				},
@@ -108,7 +151,7 @@ func handleRequest(client *http.Client, daemonURL string, req jsonRPCRequest) {
 			return
 		}
 
-		sendResult(req.ID, map[string]interface{}{
+		dc.sendResult(req.ID, map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": resultText},
 			},
@@ -116,39 +159,27 @@ func handleRequest(client *http.Client, daemonURL string, req jsonRPCRequest) {
 		})
 
 	default:
-		sendError(req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
+		dc.sendError(req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
 	}
 }
 
-func executeTool(client *http.Client, daemonURL, toolName string, args map[string]interface{}) (string, error) {
+func (dc *daemonClient) executeTool(toolName string, args map[string]interface{}) (string, error) {
 	switch toolName {
 	case "chat.health":
-		res, err := client.Get(daemonURL + "/api/v1/health")
-		if err != nil {
-			return "", err
-		}
-		defer res.Body.Close()
-		body, _ := io.ReadAll(res.Body)
-		return string(body), nil
+		return dc.getJSON(dc.baseURL + "/api/v1/health")
 
 	case "chat.rooms.list":
-		res, err := client.Get(daemonURL + "/api/v1/rooms")
-		if err != nil {
-			return "", err
-		}
-		defer res.Body.Close()
-		body, _ := io.ReadAll(res.Body)
-		return string(body), nil
+		return dc.getJSON(dc.baseURL + "/api/v1/rooms")
 
 	case "chat.room.create":
-		return postJSON(client, daemonURL+"/api/v1/rooms", args)
+		return dc.postJSON(dc.baseURL+"/api/v1/rooms", args)
 
 	case "chat.room.join":
 		roomID, _ := args["room_id"].(string)
 		if roomID == "" {
 			return "", fmt.Errorf("room_id required")
 		}
-		return postJSON(client, fmt.Sprintf("%s/api/v1/rooms/%s/join", daemonURL, roomID), map[string]interface{}{
+		return dc.postJSON(fmt.Sprintf("%s/api/v1/rooms/%s/join", dc.baseURL, url.PathEscape(roomID)), map[string]interface{}{
 			"did": args["did"],
 		})
 
@@ -157,7 +188,7 @@ func executeTool(client *http.Client, daemonURL, toolName string, args map[strin
 		if roomID == "" {
 			return "", fmt.Errorf("room_id required")
 		}
-		return postJSON(client, fmt.Sprintf("%s/api/v1/rooms/%s/leave", daemonURL, roomID), map[string]interface{}{
+		return dc.postJSON(fmt.Sprintf("%s/api/v1/rooms/%s/leave", dc.baseURL, url.PathEscape(roomID)), map[string]interface{}{
 			"did": args["did"],
 		})
 
@@ -166,70 +197,81 @@ func executeTool(client *http.Client, daemonURL, toolName string, args map[strin
 		if roomID == "" {
 			return "", fmt.Errorf("room_id required")
 		}
-		return postJSON(client, fmt.Sprintf("%s/api/v1/rooms/%s/messages", daemonURL, roomID), args)
+		return dc.postJSON(fmt.Sprintf("%s/api/v1/rooms/%s/messages", dc.baseURL, url.PathEscape(roomID)), args)
 
 	case "chat.history.fetch":
 		roomID, _ := args["room_id"].(string)
-		limit := args["limit"]
-		url := fmt.Sprintf("%s/api/v1/rooms/%s/messages", daemonURL, roomID)
-		if limit != nil {
-			url = fmt.Sprintf("%s?limit=%v", url, limit)
+		if roomID == "" {
+			return "", fmt.Errorf("room_id required")
 		}
-		res, err := client.Get(url)
-		if err != nil {
-			return "", err
+		targetURL := fmt.Sprintf("%s/api/v1/rooms/%s/messages", dc.baseURL, url.PathEscape(roomID))
+		if limit, ok := args["limit"]; ok && limit != nil {
+			targetURL = fmt.Sprintf("%s?limit=%s", targetURL, url.QueryEscape(fmt.Sprintf("%v", limit)))
 		}
-		defer res.Body.Close()
-		body, _ := io.ReadAll(res.Body)
-		return string(body), nil
+		return dc.getJSON(targetURL)
 
 	case "chat.buddy.request":
-		return postJSON(client, daemonURL+"/api/v1/buddies/request", args)
+		return dc.postJSON(dc.baseURL+"/api/v1/buddies/request", args)
 
 	case "chat.buddy.accept":
-		return postJSON(client, daemonURL+"/api/v1/buddies/accept", args)
+		return dc.postJSON(dc.baseURL+"/api/v1/buddies/accept", args)
 
 	case "chat.buddy.block":
-		return postJSON(client, daemonURL+"/api/v1/buddies/block", args)
+		return dc.postJSON(dc.baseURL+"/api/v1/buddies/block", args)
 
 	case "chat.auth.challenge":
-		return postJSON(client, daemonURL+"/api/v1/auth/challenge", map[string]interface{}{})
+		return dc.postJSON(dc.baseURL+"/api/v1/auth/challenge", map[string]interface{}{})
 
 	case "chat.auth.verify":
-		return postJSON(client, daemonURL+"/api/v1/auth/verify", args)
+		return dc.postJSON(dc.baseURL+"/api/v1/auth/verify", args)
 
 	case "chat.config.get":
-		res, err := client.Get(daemonURL + "/api/v1/config/security")
-		if err != nil {
-			return "", err
-		}
-		defer res.Body.Close()
-		body, _ := io.ReadAll(res.Body)
-		return string(body), nil
+		return dc.getJSON(dc.baseURL + "/api/v1/config/security")
 
 	case "chat.config.security":
-		return postJSON(client, daemonURL+"/api/v1/config/security", args)
+		return dc.postJSON(dc.baseURL+"/api/v1/config/security", args)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)
 	}
 }
 
-func postJSON(client *http.Client, url string, payload interface{}) (string, error) {
-	data, err := json.Marshal(payload)
+func (dc *daemonClient) doRequest(method, targetURL string, body io.Reader, contentType string) (string, error) {
+	req, err := http.NewRequest(method, targetURL, body)
 	if err != nil {
 		return "", err
 	}
-	res, err := client.Post(url, "application/json", bytes.NewReader(data))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if dc.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+dc.apiToken)
+	}
+	res, err := dc.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode >= 400 {
-		return "", fmt.Errorf("daemon error (%d): %s", res.StatusCode, string(body))
+	respBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", err
 	}
-	return string(body), nil
+	if res.StatusCode >= 400 {
+		return "", fmt.Errorf("daemon error (%d): %s", res.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return string(respBody), nil
+}
+
+func (dc *daemonClient) getJSON(targetURL string) (string, error) {
+	return dc.doRequest(http.MethodGet, targetURL, nil, "")
+}
+
+func (dc *daemonClient) postJSON(targetURL string, payload interface{}) (string, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return dc.doRequest(http.MethodPost, targetURL, bytes.NewReader(data), "application/json")
 }
 
 func getToolDefinitions() []toolDefinition {
@@ -383,22 +425,22 @@ func getToolDefinitions() []toolDefinition {
 	}
 }
 
-func sendResult(id interface{}, result interface{}) {
+func (dc *daemonClient) sendResult(id interface{}, result interface{}) {
 	resp := jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Result:  result,
 	}
 	data, _ := json.Marshal(resp)
-	fmt.Println(string(data))
+	fmt.Fprintln(dc.out, string(data))
 }
 
-func sendError(id interface{}, code int, message string) {
+func (dc *daemonClient) sendError(id interface{}, code int, message string) {
 	resp := jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error:   &rpcError{Code: code, Message: message},
 	}
 	data, _ := json.Marshal(resp)
-	fmt.Println(string(data))
+	fmt.Fprintln(dc.out, string(data))
 }

@@ -16,6 +16,7 @@ import (
 	"acr-core/pkg/governance"
 	"acr-core/pkg/identity"
 	"acr-core/pkg/models"
+	"acr-core/pkg/version"
 )
 
 // HubBroadcaster broadcasts message events to NATS/SSE bus.
@@ -743,7 +744,7 @@ func (s *Server) GetHealth() *models.HealthStatus {
 	uptime := time.Since(s.startTime)
 
 	return &models.HealthStatus{
-		Version:         "v0.8.2-draft",
+		Version:         version.Get(),
 		Status:          "healthy",
 		Uptime:          uptime.Round(time.Second).String(),
 		AgentCount:      len(s.agents),
