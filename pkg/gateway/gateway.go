@@ -1,10 +1,14 @@
 package gateway
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,10 +18,15 @@ import (
 	"acr-core/pkg/models"
 )
 
-// SecurityConfig governs Cross-Origin Resource Sharing (CORS) and Private Network Access (PNA).
+const maxUploadBytes int64 = 10 << 20 // 10 MiB
+
+// SecurityConfig governs Cross-Origin Resource Sharing (CORS), PNA, Host/Origin allowlists, and optional Bearer API auth.
 type SecurityConfig struct {
-	EnableCORS bool `json:"enable_cors"`
-	EnablePNA  bool `json:"enable_pna"`
+	EnableCORS     bool     `json:"enable_cors"`
+	EnablePNA      bool     `json:"enable_pna"`
+	APIToken       string   `json:"-"`
+	AllowedOrigins []string `json:"allowed_origins,omitempty"`
+	AllowedHosts   []string `json:"allowed_hosts,omitempty"`
 }
 
 // Server provides SSE streaming and REST APIs for human frontends.
@@ -170,26 +179,118 @@ func SetGlobalSecurityConfig(cfg SecurityConfig) {
 	globalSecurityConfig = cfg
 }
 
-func corsHeaders(w http.ResponseWriter) {
-	cfg := GetGlobalSecurityConfig()
-	if cfg.EnableCORS {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-ACR-Session, X-ACR-Client")
+func extractHostname(hostHeader string) string {
+	h := strings.TrimSpace(hostHeader)
+	if h == "" {
+		return ""
 	}
-	if cfg.EnablePNA {
-		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	if parsedHost, _, err := net.SplitHostPort(h); err == nil {
+		return strings.ToLower(strings.Trim(parsedHost, "[]"))
 	}
+	return strings.ToLower(strings.Trim(h, "[]"))
 }
 
-// CorsMiddleware wraps an http.Handler with Private Network Access (PNA) and CORS support.
+func isHostAllowed(r *http.Request, cfg SecurityConfig) bool {
+	if r.Host == "" {
+		return true
+	}
+	host := extractHostname(r.Host)
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	for _, allowed := range cfg.AllowedHosts {
+		if extractHostname(allowed) == host {
+			return true
+		}
+	}
+	return false
+}
+
+func isOriginAllowed(origin string, cfg SecurityConfig) bool {
+	if origin == "" || origin == "null" {
+		return false
+	}
+	for _, extra := range cfg.AllowedOrigins {
+		if strings.EqualFold(strings.TrimSpace(extra), origin) {
+			return true
+		}
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	hostname := strings.ToLower(u.Hostname())
+	if u.Scheme == "https" && (hostname == "agentchatrooms.dev" || hostname == "www.agentchatrooms.dev") {
+		return true
+	}
+	if (u.Scheme == "http" || u.Scheme == "https") && (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1") {
+		return true
+	}
+	return false
+}
+
+func isPublicRoute(path string) bool {
+	return path == "/health" || path == "/healthz" || path == "/api/v1/health" || path == "/api/v1/auth/challenge" || path == "/webhooks/gitea"
+}
+
+func hasValidBearerToken(r *http.Request, expected string) bool {
+	if expected == "" {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(auth, prefix) {
+		return false
+	}
+	provided := strings.TrimPrefix(auth, prefix)
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func corsHeaders(w http.ResponseWriter) {
+	// Handlers must not re-introduce wildcard '*' origins; CorsMiddleware writes validated Origin/PNA headers.
+	w.Header().Add("Vary", "Origin")
+}
+
+// CorsMiddleware wraps an http.Handler with Host/Origin validation, Private Network Access (PNA), CORS, and optional Bearer auth.
 func CorsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		corsHeaders(w)
+		cfg := GetGlobalSecurityConfig()
+		w.Header().Add("Vary", "Origin")
+
+		if !isHostAllowed(r, cfg) {
+			http.Error(w, "Forbidden host", http.StatusForbidden)
+			return
+		}
+
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if !isOriginAllowed(origin, cfg) {
+				http.Error(w, "Forbidden origin", http.StatusForbidden)
+				return
+			}
+			if cfg.EnableCORS {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-ACR-Session, X-ACR-Client, Access-Control-Request-Private-Network")
+			}
+			if cfg.EnablePNA && r.Method == http.MethodOptions {
+				w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			}
+		} else if r.Method == http.MethodOptions {
+			http.Error(w, "Origin header required for preflight", http.StatusForbidden)
+			return
+		}
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+
+		if cfg.APIToken != "" && !isPublicRoute(r.URL.Path) && !hasValidBearerToken(r, cfg.APIToken) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -754,8 +855,17 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+
 	// Read multipart file or raw bytes
-	err := r.ParseMultipartForm(50 << 20) // max 50MB
+	err := r.ParseMultipartForm(maxUploadBytes)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "Upload exceeds maximum size (10 MiB)", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
 	if err == nil && r.MultipartForm != nil {
 		file, header, err := r.FormFile("file")
 		if err != nil {
@@ -764,9 +874,13 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		defer file.Close()
 
-		data, err := io.ReadAll(file)
+		data, err := io.ReadAll(io.LimitReader(file, maxUploadBytes+1))
 		if err != nil {
 			http.Error(w, "Failed to read file", http.StatusInternalServerError)
+			return
+		}
+		if int64(len(data)) > maxUploadBytes {
+			http.Error(w, "Upload exceeds maximum size (10 MiB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -796,6 +910,11 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "Upload exceeds maximum size (10 MiB)", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Failed to read payload", http.StatusInternalServerError)
 		return
 	}
